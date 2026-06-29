@@ -21,9 +21,25 @@ documented methodology and the code that scores against it stay in sync.
 import json
 import os
 import sys
+from typing import Any
+
+import httpx
 
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
+
+
+def _extract_chunk_id(item: Any) -> str | None:
+    """Extract a chunk_id from a citation-like or retrieved-like object."""
+    if isinstance(item, str):
+        return item
+
+    if isinstance(item, dict):
+        value = item.get("chunk_id")
+        if isinstance(value, str):
+            return value
+
+    return None
 
 
 def score_grounding(response: dict, candidate_ids) -> bool:
@@ -32,31 +48,70 @@ def score_grounding(response: dict, candidate_ids) -> bool:
     `response` is the JSON body returned by POST /rag/answer.
     `candidate_ids` is the set of chunk_ids returned for the same question.
     """
-    # TODO: implement per the methodology paragraph above.
-    # Both conditions must hold:
-    #   (a) at least one citation is present
-    #   (b) every cited chunk_id is in the candidate set
-    raise NotImplementedError
+    citations = response.get("citations", [])
+
+    if not citations:
+        return False
+
+    cited_chunk_ids = [_extract_chunk_id(citation) for citation in citations]
+
+    if any(chunk_id is None for chunk_id in cited_chunk_ids):
+        return False
+
+    return all(chunk_id in candidate_ids for chunk_id in cited_chunk_ids)
 
 
 def evaluate_question(question: dict) -> bool:
     """Issue one POST /rag/answer; return True iff the response is grounded."""
-    # TODO: POST to /rag/answer with the question + k from the fixture.
-    # Use a generous timeout -- /rag/answer cold-cache can take ~10 s.
-    # Read the candidate set from the response body's `retrieved` field.
-    # Call score_grounding(response_body, candidate_ids).
-    raise NotImplementedError
+    api_url = API_URL.rstrip("/")
+    payload = {
+        "question": question["question"],
+        "k": question.get("k", 4),
+    }
+
+    try:
+        response = httpx.post(
+            f"{api_url}/rag/answer",
+            json=payload,
+            timeout=60.0,
+        )
+        response.raise_for_status()
+        response_body = response.json()
+    except Exception as exc:
+        question_id = question.get("question_id", "unknown")
+        print(f"ERROR {question_id}: {exc}", file=sys.stderr)
+        return False
+
+    retrieved = response_body.get("retrieved", [])
+    candidate_ids = {
+        chunk["chunk_id"]
+        for chunk in retrieved
+        if isinstance(chunk, dict) and isinstance(chunk.get("chunk_id"), str)
+    }
+
+    return score_grounding(response_body, candidate_ids)
 
 
 def main() -> int:
     """Iterate the three smoke questions, print PASS/FAIL, return 0 iff all PASS."""
     fixture_path = os.path.join(os.path.dirname(__file__), "data", "rag_smoke.json")
-    with open(fixture_path) as fh:
+
+    with open(fixture_path, encoding="utf-8") as fh:
         questions = json.load(fh)
 
-    # TODO: iterate `questions`, call evaluate_question on each, print PASS or
-    # FAIL per question, return 0 iff every question is grounded, else 1.
-    raise NotImplementedError
+    all_passed = True
+
+    for index, question in enumerate(questions, start=1):
+        question_id = question.get("question_id", f"q{index}")
+        passed = evaluate_question(question)
+
+        status = "PASS" if passed else "FAIL"
+        print(f"{status} {question_id}")
+
+        if not passed:
+            all_passed = False
+
+    return 0 if all_passed else 1
 
 
 if __name__ == "__main__":
