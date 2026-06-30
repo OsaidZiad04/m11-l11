@@ -29,14 +29,14 @@ import httpx
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 
 
-def _extract_chunk_id(item: Any) -> str | None:
+def _extract_chunk_id(item: Any) -> str | int | None:
     """Extract a chunk_id from a citation-like or retrieved-like object."""
-    if isinstance(item, str):
+    if isinstance(item, (str, int)):
         return item
 
     if isinstance(item, dict):
         value = item.get("chunk_id")
-        if isinstance(value, str):
+        if isinstance(value, (str, int)):
             return value
 
     return None
@@ -86,7 +86,7 @@ def evaluate_question(question: dict) -> bool:
     candidate_ids = {
         chunk["chunk_id"]
         for chunk in retrieved
-        if isinstance(chunk, dict) and isinstance(chunk.get("chunk_id"), str)
+        if isinstance(chunk, dict) and isinstance(chunk.get("chunk_id"), (str, int))
     }
 
     return score_grounding(response_body, candidate_ids)
