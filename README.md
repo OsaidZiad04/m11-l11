@@ -98,6 +98,9 @@ middlewares + mount `/metrics` in `api/main.py`, and implement
 ```bash
 docker compose down -v
 ```
+## Observability
+
+The backend now exposes a small observability layer for the M10 FastAPI service. It declares three Prometheus metric families: `requests_total` for request volume by `path` and `status`, `request_latency_seconds` for request latency by `path`, and `inflight_requests` for currently active HTTP requests. The latency histogram uses the default Prometheus latency buckets, which are sufficient for the base lab because the same metric family covers all backend paths without adding extra cardinality. Metrics can be inspected by scraping `/metrics`; the output includes `# HELP` and `# TYPE` lines followed by the current counter, histogram, and gauge samples.
 
 ## Submission
 

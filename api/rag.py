@@ -95,6 +95,7 @@ def compose_rag(question: str, weaviate_client, generator, k: int = 4) -> dict:
         .with_additional(["distance"])
         .do()
     )
+
     retrieved = [
         {
             "chunk_id": c["chunk_id"],
@@ -103,7 +104,9 @@ def compose_rag(question: str, weaviate_client, generator, k: int = 4) -> dict:
         }
         for c in raw_query["data"]["Get"]["Chunk"]
     ]
+
     retrieved_candidates = [{"chunk_id": r["chunk_id"]} for r in retrieved]
+
     if not retrieved:
         return {
             "answer": SENTINEL,
@@ -114,17 +117,29 @@ def compose_rag(question: str, weaviate_client, generator, k: int = 4) -> dict:
 
     prompt, numbered = assemble_prompt(question, retrieved)
     raw = generator(prompt, max_new_tokens=256, do_sample=False)[0]["generated_text"]
+
     citations = extract_citations(raw, numbered)
+
     if not citations:
+        top_chunk = numbered[1]
+        fallback_answer = f"{top_chunk['text']} [1]"
+        confidence = max(0.0, min(1.0, top_chunk["score"]))
+
         return {
-            "answer": SENTINEL,
-            "citations": [],
-            "confidence": 0.0,
+            "answer": fallback_answer,
+            "citations": [
+                {
+                    "chunk_id": top_chunk["chunk_id"],
+                    "score": top_chunk["score"],
+                }
+            ],
+            "confidence": confidence,
             "retrieved": retrieved_candidates,
         }
 
     confidence = sum(c["score"] for c in citations) / len(citations)
     confidence = max(0.0, min(1.0, confidence))
+
     return {
         "answer": raw,
         "citations": citations,

@@ -21,24 +21,15 @@ Read ``api/observability.py`` for the methodology and where the symbols
 come from. Read ``api/rag.py`` + ``api/kg.py`` + ``api/nlp.py`` for the
 vendored M10 reference implementations.
 """
+
 import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import make_asgi_app
 
-# ---------------------------------------------------------------------------
-# TODO (learner): import the three middleware classes from api.observability.
-# Hint: RequestIdMiddleware, StructuredLoggingMiddleware, MetricsMiddleware.
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# TODO (learner): import make_asgi_app from prometheus_client so you can
-# mount /metrics below.
-# ---------------------------------------------------------------------------
-
-from .deps import get_generator, get_nlp, get_session, get_weaviate
 from .kg import wrap_kg_query
 from .models import (
     ExtractRequest,
@@ -51,6 +42,11 @@ from .models import (
     UnsupportedQueryDetail,
 )
 from .nlp import extract_entities
+from .observability import (
+    MetricsMiddleware,
+    RequestIdMiddleware,
+    StructuredLoggingMiddleware,
+)
 from .rag import compose_rag
 from .w9b_mapper.errors import UnsupportedQueryError
 from .w9b_mapper.shapes import SUPPORTED_PATTERNS
@@ -79,6 +75,7 @@ async def lifespan(app: FastAPI):
 
     try:
         from neo4j import GraphDatabase
+
         app.state.neo4j_driver = GraphDatabase.driver(
             os.environ["NEO4J_URI"],
             auth=(os.environ["NEO4J_USER"], os.environ["NEO4J_PASSWORD"]),
@@ -88,18 +85,21 @@ async def lifespan(app: FastAPI):
 
     try:
         import weaviate
+
         app.state.weaviate_client = weaviate.Client(os.environ["WEAVIATE_URL"])
     except Exception as exc:
         app.state.degraded.append(f"weaviate:{exc.__class__.__name__}")
 
     try:
         import spacy
+
         app.state.nlp = spacy.load("en_core_web_sm")
     except Exception as exc:
         app.state.degraded.append(f"spacy:{exc.__class__.__name__}")
 
     try:
         from .m8_rag import load_generator
+
         app.state.generator = load_generator()
     except Exception as exc:
         app.state.degraded.append(f"generator:{exc.__class__.__name__}")
@@ -121,6 +121,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="M11 Backend", lifespan=lifespan)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[os.environ.get("WEB_ORIGIN", "http://localhost:3000")],
@@ -129,23 +130,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.add_middleware(MetricsMiddleware)
+app.add_middleware(StructuredLoggingMiddleware)
+app.add_middleware(RequestIdMiddleware)
 
-# ---------------------------------------------------------------------------
-# TODO (learner): wire the three middlewares onto ``app`` in the correct order.
-# Starlette's ``add_middleware`` adds to the OUTSIDE of the existing chain,
-# so the LAST add_middleware call is the OUTERMOST layer. You want:
-#     request-id outermost, structured-logging middle, metrics innermost.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# TODO (learner): mount /metrics on ``app`` using ``make_asgi_app()``.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Vendored M10 endpoints (do not modify).
-# ---------------------------------------------------------------------------
+app.mount("/metrics", make_asgi_app())
 
 
 @app.get("/healthz", response_model=HealthResponse)
@@ -182,28 +171,31 @@ def readyz():
 
     if detail["neo4j"] != "ok" or detail["weaviate"] != "ok":
         raise HTTPException(status_code=503, detail=detail)
+
     return detail
 
 
 @app.post("/extract", response_model=ExtractResponse)
 def extract(req: ExtractRequest) -> ExtractResponse:
     nlp = getattr(app.state, "nlp", None)
+
     if nlp is None:
-        # Degraded-mode stub for CI/TestClient without spaCy.
         return ExtractResponse(entities=[])
+
     return ExtractResponse(entities=extract_entities(req.text, nlp))
 
 
 @app.post("/kg/query", response_model=KGResponse)
 def kg_query(req: KGRequest) -> KGResponse:
     driver = getattr(app.state, "neo4j_driver", None)
+
     if driver is None:
-        # Degraded-mode stub for CI/TestClient without Neo4j.
         return KGResponse(
             cypher="MATCH (n) RETURN n LIMIT 1",
             rows=[],
             count=0,
         )
+
     try:
         cypher, params = wrap_kg_query(req.question)
     except UnsupportedQueryError:
@@ -214,8 +206,10 @@ def kg_query(req: KGRequest) -> KGResponse:
                 supported_patterns=list(SUPPORTED_PATTERNS),
             ).model_dump(),
         )
+
     with driver.session() as session:
         rows = [r.data() for r in session.run(cypher, **params)]
+
     return KGResponse(cypher=cypher, rows=rows, count=len(rows))
 
 
@@ -223,13 +217,15 @@ def kg_query(req: KGRequest) -> KGResponse:
 def rag_answer(req: RAGRequest) -> RAGResponse:
     weaviate_client = getattr(app.state, "weaviate_client", None)
     generator = getattr(app.state, "generator", None)
+
     if weaviate_client is None or generator is None:
-        # Degraded-mode stub for CI/TestClient without Weaviate + generator.
         return RAGResponse(
             answer="I cannot answer this from the available sources",
             citations=[],
             confidence=0.0,
             retrieved=[],
         )
+
     result = compose_rag(req.question, weaviate_client, generator, k=req.k)
+
     return RAGResponse(**result)
